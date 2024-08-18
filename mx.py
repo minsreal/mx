@@ -72,6 +72,8 @@ from stat import S_IWRITE
 from mx_commands import MxCommands, MxCommand
 from copy import copy, deepcopy
 import posixpath
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 _mx_commands = MxCommands("mx")
 
@@ -273,7 +275,7 @@ def _function_code(f):
 
 def _check_output_str(*args, **kwargs):
     try:
-        return subprocess.check_output(*args, **kwargs).decode()
+        return subprocess.check_output(*args, **kwargs).decode('gbk')
     except subprocess.CalledProcessError as e:
         if e.output:
             e.output = e.output.decode()
@@ -1508,6 +1510,8 @@ class Dependency(SuiteConstituent):
         for dep_type, dep_list in deps:
             if not _is_edge_ignored(dep_type, ignoredEdges):
                 for dst in dep_list:
+                    if 'com.oracle.mxtool.junit' in str(dst):
+                        return
                     out_edge = DepEdge(self, dep_type, in_edge)
                     if visitEdge:
                         visitEdge(self, dst, out_edge)
@@ -2002,6 +2006,8 @@ class Suite(object):
             if existing is not None and existing != l:
                 abort('inconsistent JRE library redefinition of ' + l.name + ' in ' + existing.suite.dir + ' and ' + l.suite.dir, context=l)
             _jreLibs[l.name] = l
+        # print('jdkLibs:')
+        # print(self.jdkLibs)
         for l in self.jdkLibs:
             existing = _jdkLibs.get(l.name)
             # Check that suites that define same library are consistent
@@ -2077,7 +2083,8 @@ class Suite(object):
             write = scmDict.pop('write', read)
             url = scmDict.pop('url', read)
             self.scm = SCMMetadata(url, read, write)
-
+        # print('jreLibsMap:')
+        # print(jreLibsMap)
         for name, attrs in sorted(jreLibsMap.items()):
             jar = attrs.pop('jar')
             # JRE libraries are optional by default
@@ -2085,7 +2092,8 @@ class Suite(object):
             theLicense = attrs.pop(self.getMxCompatibility().licenseAttribute(), None)
             l = JreLibrary(self, name, jar, optional, theLicense, **attrs)
             self.jreLibs.append(l)
-
+        # print('jdkLibsMap:')
+        # print(jdkLibsMap)
         for name, attrs in sorted(jdkLibsMap.items()):
             path = attrs.pop('path')
             deps = Suite._pop_list(attrs, 'dependencies', context='jdklibrary ' + name)
@@ -7522,11 +7530,14 @@ class JavaBuildTask(ProjectBuildTask):
         javafiles = self._get_javafiles()
         if javafiles:
             self.postCompileActions = []
+            classes = classpath(self.subject.name, includeSelf=False, jdk=self.jdk, ignoreStripped=True)
+            if (len(classes)) > 0:
+                classes += ';D:\\openjdk-8u30206-jvmci-22.0-b01\\openjdk1.8.0_302-jvmci-22.0-b01-fastdebug\\lib\\tools.jar;D:\\openjdk-8u30206-jvmci-22.0-b01\\openjdk1.8.0_302-jvmci-22.0-b01-fastdebug\\jre\\lib\\rt.jar'
             self.compileArgs = self.compiler.prepare(
                 sourceFiles=[_cygpathU2W(f) for f in sorted(javafiles.keys())],
                 project=self.subject,
                 outputDir=_cygpathU2W(outputDir),
-                classPath=_separatedCygpathU2W(classpath(self.subject.name, includeSelf=False, jdk=self.jdk, ignoreStripped=True)),
+                classPath=_separatedCygpathU2W(classes),
                 sourceGenDir=self.subject.source_gen_dir(),
                 jnigenDir=self.subject.jni_gen_dir(),
                 processorPath=_separatedCygpathU2W(self.subject.annotation_processors_path(self.jdk)),
@@ -7554,6 +7565,7 @@ class JavaBuildTask(ProjectBuildTask):
         # Java build
         if self.compileArgs:
             try:
+                # print(self.compileArgs)
                 self.compiler.compile(self.compileArgs)
             finally:
                 for action in self.postCompileActions:
@@ -7660,7 +7672,10 @@ class JavacLikeCompiler(JavaCompiler):
             # We only need this on javac as on ECJ we strip the jmods directory - see code later
             javacArgs.append('-Xbootclasspath/p:' + classPath)
         else:
+            # print("classpath: ")
+            # print(classpath)
             javacArgs += ['-classpath', classPath]
+            # print(javacArgs)
         if compliance.value >= 8:
             javacArgs.append('-parameters')
         if processorPath:
@@ -8013,6 +8028,8 @@ class CompilerDaemon(Daemon):
         s.connect(('127.0.0.1', self.port))
         logv(self.jdk.javac + ' ' + ' '.join(compilerArgs))
         commandLine = u'\x00'.join(compilerArgs)
+        # print("commandLine")
+        # print(commandLine)
         s.send((commandLine + '\n').encode('utf-8'))
         f = s.makefile()
         response = str(f.readline())
@@ -12407,6 +12424,8 @@ def classpath(names=None, resolve=True, includeSelf=True, includeBootClasspath=F
     then all registered dependencies are used.
     """
     cpEntries = classpath_entries(names=names, includeSelf=includeSelf, preferProjects=preferProjects)
+    # print("cpEntries:")
+    # print(cpEntries)
     return _entries_to_classpath(cpEntries=cpEntries, resolve=resolve, includeBootClasspath=includeBootClasspath, jdk=jdk, unique=unique, ignoreStripped=ignoreStripped)
 
 
@@ -13435,7 +13454,7 @@ def run(args, nonZeroIsFatal=True, out=None, err=None, cwd=None, timeout=None, e
 
         def redirect(stream, f):
             for line in iter(stream.readline, b''):
-                f(line.decode())
+                f(line.decode('gbk')) # decode
             stream.close()
         stdout = out if not callable(out) else subprocess.PIPE
         stderr = err if not callable(err) else subprocess.PIPE
@@ -14599,6 +14618,9 @@ def build(cmd_args, parser=None):
         else:
             task = dep.getBuildTask(args)
         if task.subject in taskMap:
+            return
+        # print(str(task))
+        if 'com.oracle.mxtool.junit' in str(task):
             return
         taskMap[dep] = task
         if onlyDeps is None or task.subject.name in onlyDeps:
